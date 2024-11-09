@@ -1,81 +1,150 @@
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
+from io import BytesIO
+import locale
 from datetime import datetime
 
+# Configurar regionalización en español
+locale.setlocale(locale.LC_TIME, 'es_ES.UTF-8')
+
+COLUMNAS_REQUERIDAS_KARDEX = [
+    'FECHA', 'REFERENCIA', 'CODIGO', 'PRODUCTO', 'CANTIAD', 
+    'PRECIO', 'IMPUESTO', 'SUBTOTAL', 'CATEGORIA', 'BODEGA', 'MOVIMIENTO'
+]
+
+COLUMNAS_ROTACION = [
+    'CODIGO', 'INV GAITAN', 'INV OPORTO', 'INV SAMARIA', 
+    'INV VENCIDOS/ROTURA', 'INV MIROLINDO'
+]
+
+def validar_columnas(dataframe, columnas_requeridas):
+    """Verifica que las columnas requeridas estén en el DataFrame."""
+    columnas_faltantes = [col for col in columnas_requeridas if col not in dataframe.columns]
+    if columnas_faltantes:
+        raise ValueError(f"Faltan las siguientes columnas: {', '.join(columnas_faltantes)}")
+
+def convertir_fecha(column):
+    """Convierte las columnas de fecha en formato datetime."""
+    return pd.to_datetime(column, format='%d/%m/%Y', errors='coerce')
+
+def limpiar_codigos(df, columna='CODIGO'):
+    """Limpia el contenido de la columna CODIGO eliminando espacios y comillas simples."""
+    df[columna] = df[columna].astype(str).str.replace("'", "").str.strip().str.upper()
+    return df
+
+def calcular_antiguedad(kardex_df):
+    """Calcula la antigüedad de la última compra, traspaso y venta."""
+    kardex_df['FECHA'] = convertir_fecha(kardex_df['FECHA'])
+
+    # Filtrar movimientos
+    compras = kardex_df[kardex_df['MOVIMIENTO'].str.contains('entrada.*Compra', case=False, na=False)]
+    traspasos = kardex_df[kardex_df['MOVIMIENTO'].str.contains('entrada.*Traspaso', case=False, na=False)]
+    ventas = kardex_df[kardex_df['CANTIAD'] < 0]
+
+    # Agrupar y obtener la última fecha por tipo de movimiento
+    ultima_compra = compras.groupby(['CODIGO', 'PRODUCTO', 'BODEGA', 'CATEGORIA'])['FECHA'].max()
+    ultimo_traspaso = traspasos.groupby(['CODIGO', 'PRODUCTO', 'BODEGA', 'CATEGORIA'])['FECHA'].max()
+    ultima_venta = ventas.groupby(['CODIGO', 'PRODUCTO', 'BODEGA', 'CATEGORIA'])['FECHA'].max()
+
+    # Alinear índices
+    productos = ultima_compra.index.union(ultimo_traspaso.index).union(ultima_venta.index)
+    ultima_compra = ultima_compra.reindex(productos)
+    ultimo_traspaso = ultimo_traspaso.reindex(productos)
+    ultima_venta = ultima_venta.reindex(productos)
+
+    ahora = pd.Timestamp(datetime.now())
+
+    # Calcular antigüedad en días
+    antiguedad_compra = (ahora - ultima_compra).dt.days.fillna(np.inf)
+    antiguedad_traspaso = (ahora - ultimo_traspaso).dt.days.fillna(np.inf)
+    antiguedad_venta = (ahora - ultima_venta).dt.days.fillna(np.inf)
+
+    antiguedad_df = pd.DataFrame({
+        'CODIGO': [x[0] for x in productos],
+        'PRODUCTO': [x[1] for x in productos],
+        'BODEGA': [x[2] for x in productos],
+        'CATEGORIA': [x[3] for x in productos],
+        'Fecha Última Compra': ultima_compra.values,
+        'Antigüedad Última Compra (días)': antiguedad_compra.values,
+        'Fecha (Entrada) Traspaso': ultimo_traspaso.values,
+        'Antigüedad Último Traspaso (días)': antiguedad_traspaso.values,
+        'Fecha Última Venta': ultima_venta.values,
+        'Antigüedad Última Venta (días)': antiguedad_venta.values
+    })
+
+    return antiguedad_df
+
+def integrar_inventario_por_bodega(antiguedad_df, rotacion_df):
+    """Integra el inventario por bodega usando CODIGO."""
+    # Limpiar y asegurar coincidencia de códigos
+    antiguedad_df = limpiar_codigos(antiguedad_df)
+    rotacion_df = limpiar_codigos(rotacion_df)
+
+    # Unir los DataFrames usando la columna CODIGO
+    inventario_completo = antiguedad_df.merge(
+        rotacion_df[['CODIGO', 'INV GAITAN', 'INV OPORTO', 'INV SAMARIA', 'INV MIROLINDO']], 
+        on='CODIGO', how='left'
+    )
+
+    # Renombrar las columnas de inventario por bodega
+    inventario_completo = inventario_completo.rename(columns={
+        'INV GAITAN': 'Inventario Gaitan',
+        'INV OPORTO': 'Inventario Oporto',
+        'INV SAMARIA': 'Inventario Samaria',
+        'INV MIROLINDO': 'Inventario Mirolindo'
+    })
+
+    return inventario_completo
+
+def generar_excel(dataframe):
+    """Genera un archivo Excel con los datos."""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        dataframe.to_excel(writer, sheet_name='Datos Procesados', index=False)
+    output.seek(0)
+    return output
+
 def main():
-    st.title("Reporte de Antigüedad de Movimientos e Inventario")
-    
-    # Cargar archivos CSV
-    antiguedad_file = st.file_uploader("Sube el archivo de movimientos (kardex)", type=["csv"])
-    inventory_file = st.file_uploader("Sube el archivo de inventario", type=["csv"])
-    
-    if antiguedad_file and inventory_file:
-        # Procesar archivo de movimientos (kardex)
-        kardex_df = pd.read_csv(antiguedad_file, encoding='latin1', delimiter=';', on_bad_lines='skip')
-        kardex_df['FECHA'] = pd.to_datetime(kardex_df['FECHA'], errors='coerce', dayfirst=True)
-        kardex_df = kardex_df.dropna(subset=['FECHA'])
-        kardex_df.columns = kardex_df.columns.str.strip("'")
-        kardex_df['MOVIMIENTO'] = kardex_df['MOVIMIENTO'].str.lower()
-        
-        # Filtrar datos para cada tipo de movimiento
-        purchase_df = kardex_df[kardex_df['MOVIMIENTO'].str.contains('compra')]
-        transfer_df = kardex_df[kardex_df['MOVIMIENTO'].str.contains('traspaso')]
-        sale_df = kardex_df[kardex_df['MOVIMIENTO'].str.contains('venta')]
+    st.title("Análisis de Inventario con Antigüedad e Inventario por Bodega")
 
-        # Calcular la última fecha de cada movimiento por combinación de CODIGO y BODEGA
-        last_purchase = purchase_df.groupby(['CODIGO', 'BODEGA'])['FECHA'].max().reset_index().rename(columns={'FECHA': 'ULTIMA_COMPRA'})
-        last_transfer = transfer_df.groupby(['CODIGO', 'BODEGA'])['FECHA'].max().reset_index().rename(columns={'FECHA': 'ULTIMO_TRASPASO'})
-        last_sale = sale_df.groupby(['CODIGO', 'BODEGA'])['FECHA'].max().reset_index().rename(columns={'FECHA': 'ULTIMA_VENTA'})
-        
-        # Merge de las fechas de último movimiento
-        antiguedad_df = pd.merge(last_purchase, last_transfer, on=['CODIGO', 'BODEGA'], how='outer')
-        antiguedad_df = pd.merge(antiguedad_df, last_sale, on=['CODIGO', 'BODEGA'], how='outer')
+    # Subida de archivos
+    archivo_kardex = st.file_uploader("Sube el archivo Kardex.csv", type=["csv"])
+    archivo_rotacion = st.file_uploader("Sube el archivo Rotacion.csv", type=["csv"])
 
-        # Calcular antigüedad de cada tipo de movimiento
-        antiguedad_df['ANTIGUEDAD_ULTIMA_COMPRA'] = (datetime.today() - antiguedad_df['ULTIMA_COMPRA']).dt.days
-        antiguedad_df['ANTIGUEDAD_ULTIMO_TRASPASO'] = (datetime.today() - antiguedad_df['ULTIMO_TRASPASO']).dt.days
-        antiguedad_df['ANTIGUEDAD_ULTIMA_VENTA'] = (datetime.today() - antiguedad_df['ULTIMA_VENTA']).dt.days
+    if archivo_kardex and archivo_rotacion:
+        try:
+            # Cargar los archivos CSV
+            kardex_df = pd.read_csv(archivo_kardex, encoding='latin1', sep=';')
+            rotacion_df = pd.read_csv(archivo_rotacion, encoding='latin1', sep=';')
 
-        # Procesar archivo de inventario
-        inventory_df = pd.read_csv(inventory_file, encoding='latin1', delimiter=';', on_bad_lines='skip')
-        
-        # Buscar y renombrar la columna que contiene "PRODUCTO"
-        producto_columna = [col for col in inventory_df.columns if "PRODUCTO" in col.upper()]
-        if producto_columna:
-            inventory_df = inventory_df.rename(columns={producto_columna[0]: 'PRODUCTO'})
-        
-        inventory_df['CODIGO'] = inventory_df['CODIGO'].str.replace("'", "")
+            # Validar columnas
+            validar_columnas(kardex_df, COLUMNAS_REQUERIDAS_KARDEX)
+            validar_columnas(rotacion_df, COLUMNAS_ROTACION)
 
-        # Limpiar la columna 'CODIGO' en antiguedad_df para que coincida
-        antiguedad_df['CODIGO'] = antiguedad_df['CODIGO'].str.replace("'", "")
+            # Calcular antigüedad
+            antiguedad_df = calcular_antiguedad(kardex_df)
 
-        # Selección de columnas relevantes y ajuste del formato del inventario
-        inventory_selected = inventory_df[['CODIGO', 'PRODUCTO', 'CATEGORIA', 'INV GAITAN', 'INV OPORTO', 'INV SAMARIA', 'INV MIROLINDO']]
-        inventory_long = inventory_selected.melt(id_vars=['CODIGO', 'PRODUCTO', 'CATEGORIA'], 
-                                                 value_vars=['INV GAITAN', 'INV OPORTO', 'INV SAMARIA', 'INV MIROLINDO'], 
-                                                 var_name='BODEGA', value_name='INVENTARIO')
-        inventory_long['BODEGA'] = inventory_long['BODEGA'].str.replace("INV ", "")
-        
-        # Merge del inventario con los datos de antigüedad
-        final_report_df = pd.merge(antiguedad_df, inventory_long, on=['CODIGO', 'PRODUCTO', 'CATEGORIA', 'BODEGA'], how='left')
+            # Integrar inventario por bodega
+            inventario_completo = integrar_inventario_por_bodega(antiguedad_df, rotacion_df)
 
-        # Ordenar las columnas según la solicitud
-        final_report_df = final_report_df[['CODIGO', 'PRODUCTO', 'CATEGORIA', 'BODEGA', 'ULTIMA_COMPRA', 
-                                           'ULTIMO_TRASPASO', 'ULTIMA_VENTA', 'ANTIGUEDAD_ULTIMA_COMPRA', 
-                                           'ANTIGUEDAD_ULTIMO_TRASPASO', 'ANTIGUEDAD_ULTIMA_VENTA', 'INVENTARIO']]
-        
-        # Mostrar el reporte final
-        st.write("Reporte de Antigüedad de Movimientos e Inventario")
-        st.dataframe(final_report_df)
-        
-        # Permitir la descarga del reporte en formato CSV
-        csv = final_report_df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="Descargar reporte como CSV",
-            data=csv,
-            file_name='reporte_antiguedad_inventario.csv',
-            mime='text/csv',
-        )
+            st.write("Inventario Completo por Bodega con Antigüedad:")
+            st.dataframe(inventario_completo)
+
+            # Generar archivo Excel
+            datos_excel = generar_excel(inventario_completo)
+
+            st.download_button(
+                label="Descargar Datos en Excel",
+                data=datos_excel,
+                file_name="inventario_por_bodega.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+        except ValueError as ve:
+            st.error(f"Error: {ve}")
+        except Exception as e:
+            st.error(f"Hubo un error al procesar los archivos: {e}")
 
 if __name__ == "__main__":
     main()
