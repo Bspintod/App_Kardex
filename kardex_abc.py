@@ -4,8 +4,11 @@ import numpy as np
 from io import BytesIO
 import locale
 
-# Configurar regionalización en español
-locale.setlocale(locale.LC_TIME, 'es_ES.UTF-8')
+# Intentar establecer la configuración regional a español, si no está disponible usar predeterminada
+try:
+    locale.setlocale(locale.LC_TIME, 'es_ES.UTF-8')
+except locale.Error:
+    locale.setlocale(locale.LC_TIME, 'C')
 
 def procesar_ventas(kardex_df):
     """Procesa las ventas por cada bodega y fecha."""
