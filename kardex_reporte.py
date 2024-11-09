@@ -14,9 +14,19 @@ COLUMNAS_REQUERIDAS_KARDEX = [
 ]
 
 COLUMNAS_ROTACION = [
-    'CODIGO', 'INV GAITAN', 'INV OPORTO', 'INV SAMARIA', 
+    'CODIGO', 'COSTO', 'PRECIO', 'INV GAITAN', 'INV OPORTO', 'INV SAMARIA', 
     'INV VENCIDOS/ROTURA', 'INV MIROLINDO'
 ]
+
+ESTRATEGIA_ROTACION = {
+    (0, 20): "Nuevo en Inventario",
+    (21, 60): "Venta Lenta Inicial",
+    (61, 90): "Alerta Moderada",
+    (91, 180): "Riesgo de Estancamiento",
+    (181, 330): "Inventario Crítico",
+    (331, 365): "Inventario Obsoleto",
+    (366, float('inf')): "Pérdida Potencial"
+}
 
 def validar_columnas(dataframe, columnas_requeridas):
     """Verifica que las columnas requeridas estén en el DataFrame."""
@@ -83,7 +93,7 @@ def integrar_inventario_por_bodega(antiguedad_df, rotacion_df):
 
     # Unir los DataFrames usando la columna CODIGO
     inventario_completo = antiguedad_df.merge(
-        rotacion_df[['CODIGO', 'INV GAITAN', 'INV OPORTO', 'INV SAMARIA', 'INV MIROLINDO']], 
+        rotacion_df[['CODIGO', 'COSTO', 'PRECIO', 'INV GAITAN', 'INV OPORTO', 'INV SAMARIA', 'INV MIROLINDO']], 
         on='CODIGO', how='left'
     )
 
@@ -94,6 +104,24 @@ def integrar_inventario_por_bodega(antiguedad_df, rotacion_df):
         'INV SAMARIA': 'Inventario Samaria',
         'INV MIROLINDO': 'Inventario Mirolindo'
     })
+
+    # Calcular nuevas columnas
+    inventario_completo['TotalInv'] = inventario_completo[['Inventario Gaitan', 'Inventario Oporto', 'Inventario Samaria', 'Inventario Mirolindo']].sum(axis=1)
+    inventario_completo['$ Gaitan'] = inventario_completo['Inventario Gaitan'] * inventario_completo['COSTO']
+    inventario_completo['$ Oporto'] = inventario_completo['Inventario Oporto'] * inventario_completo['COSTO']
+    inventario_completo['$ Samaria'] = inventario_completo['Inventario Samaria'] * inventario_completo['COSTO']
+    inventario_completo['$ Mirolindo'] = inventario_completo['Inventario Mirolindo'] * inventario_completo['COSTO']
+    inventario_completo['ValorInventario'] = inventario_completo[['$ Gaitan', '$ Oporto', '$ Samaria', '$ Mirolindo']].sum(axis=1)
+
+    # Calcular Rango de Días y Estrategia
+    def determinar_rango_estrategia(dias):
+        for rango, estrategia in ESTRATEGIA_ROTACION.items():
+            if rango[0] <= dias <= rango[1]:
+                return estrategia
+        return 'Sin Estrategia'
+
+    inventario_completo['Rango de Días'] = inventario_completo['Antigüedad Última Venta (días)'].apply(determinar_rango_estrategia)
+    inventario_completo['Estrategia'] = inventario_completo['Rango de Días']
 
     return inventario_completo
 
